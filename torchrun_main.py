@@ -74,6 +74,8 @@ def parse_args(args):
     
     # disable ddp, single_gpu
     parser.add_argument("--single_gpu", default=False, action="store_true")
+
+    parser.add_argument("--data_type", type=str, default='c4')
     
     args = parser.parse_args(args)
 
@@ -84,7 +86,7 @@ def parse_args(args):
 @torch.no_grad()
 def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size):
     _time = time.time()
-    val_data = datasets.load_dataset("c4", "en", split="validation", streaming=True, trust_remote_code=True) #DGX
+    val_data = datasets.load_dataset("/lpai/dataset/lpx-hf-cache/0-1-0/hf_cache/c4/en", split="validation", streaming=True, trust_remote_code=True) #DGX
     val_data = val_data.shuffle(seed=42)
     logger.info(f"Loaded validation dataset in {time.time() - _time:.2f} seconds")
 
@@ -159,7 +161,7 @@ def main(args):
             
     # initialize wandb without config (it is passed later)
     if global_rank == 0:
-        wandb.init(project="mixln", name=args.run_name)
+        wandb.init(project="qwen_exp", name=args.run_name)
         
     logger.info(f"Using dist with rank {global_rank} (only rank 0 will log)")
     logger.info("*" * 40)
@@ -168,7 +170,10 @@ def main(args):
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+    if args.data_type == 'c4':
+        data = datasets.load_dataset("/lpai/dataset/lpx-hf-cache/0-1-0/hf_cache/c4/en", split="train", streaming=True)
+    elif args.data_type == 'cot':
+        data = datasets.load_from_disk("/lpai/volumes/ad-vla-vol-ga/lipengxiang/MixLN/merged_qa_dataset")
 
     seed_for_shuffle = 32 
     
@@ -315,6 +320,7 @@ def main(args):
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True,
         )
 
     # global steps and others are defined above

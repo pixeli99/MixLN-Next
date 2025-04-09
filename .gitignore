@@ -5,7 +5,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 _build
-
+*.bin
+merged_qa_dataset/*
 # C extensions
 *.so
 

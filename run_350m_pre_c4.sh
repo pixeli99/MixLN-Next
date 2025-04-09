@@ -9,10 +9,10 @@ export HF_HOME="/lpai/volumes/ad-vla-vol-ga/lipengxiang/vla/hf_cache"
 
 echo "Training with learning rate: $learning_rates, norm type: $norm_type on GPU $gpu"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node 8 --master_port=29503 torchrun_main.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node 4 --master_port=29503 torchrun_main.py \
     --model_config configs/llama_350m.json \
     --lr $learning_rates \
-    --batch_size 16 \
+    --batch_size 32 \
     --total_batch_size 512 \
     --num_training_steps 60000 \
     --warmup_steps 6000 \

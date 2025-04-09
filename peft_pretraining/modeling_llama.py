@@ -103,7 +103,7 @@ class CustomNorm(nn.Module):
         return x
 
 class RadialNorm(nn.Module):
-    def __init__(self, num_features, alpha=1.0):
+    def __init__(self, num_features, alpha=0.1):
         super().__init__()
         self.gamma = nn.Parameter(torch.ones(num_features))
         self.beta = nn.Parameter(torch.zeros(num_features))

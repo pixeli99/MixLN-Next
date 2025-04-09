@@ -461,7 +461,7 @@ class LlamaDecoderLayer(nn.Module):
 
         norm_type = os.getenv('NORM_TYPE', 'pre').lower()
         
-        if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre':
+        if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
             # Pre-LayerNorm Only
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)

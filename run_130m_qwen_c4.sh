@@ -9,8 +9,8 @@ export HF_HOME="/lpai/volumes/ad-vla-vol-ga/lipengxiang/vla/hf_cache"
 
 echo "Training with learning rate: $learning_rates, norm type: $norm_type on GPU $gpu"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=29503 torchrun_main.py \
-    --model_config configs/llama_350m_qwen.json \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=29501 torchrun_main.py \
+    --model_config configs/llama_130m_qwen.json \
     --lr $learning_rates \
     --batch_size 32 \
     --total_batch_size 512 \
@@ -21,6 +21,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=29503 tor
     --eval_every 1000 \
     --optimizer adam \
     --grad_clipping 0.0 \
-    --run_name "${LPAI_MODEL_DIR}/350m_res_${norm_type}_lr${learning_rates}_qwen" \
-    --save_dir "${LPAI_MODEL_DIR}/350m_qwen_res_${norm_type}_lr${learning_rates}" \
+    --run_name "${LPAI_MODEL_DIR}/130m_res_${norm_type}_lr${learning_rates}_qwen" \
+    --save_dir "${LPAI_MODEL_DIR}/130m_qwen_res_${norm_type}_lr${learning_rates}" \
     --max_length 1024

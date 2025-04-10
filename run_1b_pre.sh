@@ -24,4 +24,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node 8 --master_port=2
     --optimizer adam \
     --grad_clipping 0.0 \
     --run_name "1b_res_${norm_type}_lr${learning_rates}" \
-    --save_dir "1b_res_${norm_type}_lr${learning_rates}"
+    --save_dir "${LPAI_MODEL_DIR}/1b_res_${norm_type}_lr${learning_rates}"

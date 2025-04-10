@@ -349,6 +349,10 @@ class LlamaDecoderLayer(nn.Module):
         elif norm_type == 'group_pre':
             self.input_layernorm = CustomNorm(num_groups=8, dim=self.hidden_size)
             self.post_attention_layernorm = CustomNorm(num_groups=8, dim=self.hidden_size)
+        elif norm_type == 'lpx_norm' or norm_type == 'lpx_normv2':
+            self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm_weight = nn.Parameter(torch.Tensor([0]))
         elif norm_type== 'post' or norm_type == 'deeppost' or norm_type == 'admin':
             self.post_feedforward_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -912,6 +916,28 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.alpha_t[self.layer_index] * hidden_states # scale
 
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
+
+        elif norm_type == 'lpx_norm':
+            # Pre-LayerNorm Only
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+            residual = hidden_states * self.norm_weight + residual
+
+            hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+            hidden_states = residual + hidden_states
+            # -------
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            residual = hidden_states * self.norm_weight + residual
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
         elif norm_type == 'deit':

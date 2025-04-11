@@ -77,6 +77,12 @@ def parse_args(args):
 
     parser.add_argument("--data_type", type=str, default='c4')
     
+    # 添加循环执行相关参数
+    parser.add_argument("--loop_enabled", default=False, action="store_true", help="启用transformer层的循环执行")
+    parser.add_argument("--loop_init_prob", type=str, default="0.95,0.04,0.01", help="初始循环次数概率分布(1,2,3次)")
+    parser.add_argument("--loop_final_prob", type=str, default="0.5,0.3,0.2", help="最终循环次数概率分布(1,2,3次)")
+    parser.add_argument("--loop_schedule", type=str, default="linear", choices=["linear", "step"], help="循环概率调整策略")
+    
     args = parser.parse_args(args)
 
     args = args_utils.check_args_torchrun_main(args)
@@ -323,6 +329,13 @@ def main(args):
             find_unused_parameters=True,
         )
 
+    # 设置循环执行相关环境变量
+    if args.loop_enabled:
+        os.environ['LOOP_ENABLED'] = 'true'
+        logger.info(f"循环执行已启用. 初始概率: {args.loop_init_prob}, 最终概率: {args.loop_final_prob}")
+    else:
+        os.environ['LOOP_ENABLED'] = 'false'
+
     # global steps and others are defined above
     pad_idx = tokenizer.pad_token_id
     update_time = time.time()
@@ -348,7 +361,11 @@ def main(args):
         labels[labels == pad_idx] = -100
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
-        loss = model(**batch, labels=labels).loss
+        if 'forward_kwargs' not in locals():
+            forward_kwargs = {}
+        forward_kwargs.update({'update_step': update_step, 'total_steps': args.num_training_steps})
+
+        loss = model(**batch, labels=labels, **forward_kwargs).loss
         scaled_loss = loss / args.gradient_accumulation
         scaled_loss.backward()
 

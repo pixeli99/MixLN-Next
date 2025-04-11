@@ -440,6 +440,11 @@ class LlamaDecoderLayer(nn.Module):
                 self.post_feedforward_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
                 self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             
+        # 添加循环控制相关属性
+        self.loop_enabled = os.getenv('LOOP_ENABLED', 'false').lower() == 'true'
+        self.time_embedding = nn.Embedding(4, config.hidden_size) if self.loop_enabled else None
+        self.loop_controller = nn.Linear(config.hidden_size, 1) if self.loop_enabled else None
+            
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -448,6 +453,9 @@ class LlamaDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        loop_num: int = 1,  # 新增参数，控制循环次数
+        update_step: int = 0,  # 新增参数，当前训练步数
+        total_steps: int = 0,  # 新增参数，总训练步数
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -461,10 +469,15 @@ class LlamaDecoderLayer(nn.Module):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+            loop_num (`int`, *optional*): 该层循环执行的次数，默认为1
         """
 
         norm_type = os.getenv('NORM_TYPE', 'pre').lower()
         
+        # 保存初始输入状态用于循环
+        original_hidden_states = hidden_states
+        
+        # 常规的一次前向传播 (第1次循环)
         if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
             # Pre-LayerNorm Only
             residual = hidden_states
@@ -960,6 +973,45 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states * self.scale_hs
 
+        # 如果启用了循环并且请求的循环次数大于1
+        if self.loop_enabled and loop_num > 1:
+            current_state = hidden_states
+            accumulated_output = hidden_states
+
+            # 额外的循环执行 (第2次及以后)
+            for i in range(1, loop_num):
+                # 添加时间嵌入，区分不同迭代
+                # time_emb = self.time_embedding(torch.tensor(i % 3, device=hidden_states.device)).unsqueeze(1)
+                
+                # 基于当前状态计算下一次循环的输入
+                if norm_type == 'pre' or norm_type in ['scale_pre', 'group_pre', 'radia']:
+                    residual = current_state
+                    layer_input = self.input_layernorm(current_state)
+                    attn_output, _, _ = self.self_attn(
+                        hidden_states=layer_input,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=None,  # 迭代时不使用缓存
+                        output_attentions=False,
+                        use_cache=False,
+                    )
+                    attn_output = residual + attn_output
+                    
+                    residual = attn_output
+                    mlp_input = self.post_attention_layernorm(attn_output)
+                    mlp_output = self.mlp(mlp_input)
+                    iter_output = residual + mlp_output
+                    
+                    # 更新当前状态
+                    current_state = iter_output
+                    
+                    # 使用简单平均累积结果
+                    # accumulated_output = (accumulated_output * i + current_state) / (i + 1)
+                # ...可以添加其他norm_type的循环逻辑...
+                
+            # 使用累积的输出替代单次前向传播的结果
+            hidden_states = current_state
+
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -1146,7 +1198,7 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
         if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_len]
             expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
                 inputs_embeds.device
             )
@@ -1168,6 +1220,8 @@ class LlamaModel(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        update_step: Optional[int] = 0,
+        total_steps: Optional[int] = 1,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1223,6 +1277,28 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
                 use_cache = False
 
+        # 基于训练进度计算循环次数的概率分布
+        if self.training and os.getenv('LOOP_ENABLED', 'false').lower() == 'true':
+            # 训练初期主要使用loop=1，随着训练进度增加loop=2/3的概率
+            progress = min(1.0, update_step / (total_steps * 0.5))  # 在一半的训练过程中完成概率转变
+            # 随着训练进度调整概率分布: {p(1), p(2), p(3)}
+            if progress < 0.2:
+                probs = [0.95, 0.04, 0.01]  # 初期几乎只用一次循环
+            elif progress < 0.5:
+                probs = [0.8, 0.15, 0.05]  # 中期开始增加多循环概率
+            else:
+                probs = [0.5, 0.3, 0.2]  # 后期使用目标分布
+            
+            # 为每一层随机决定循环次数
+            loop_decisions = torch.multinomial(
+                torch.tensor(probs, device=hidden_states.device),
+                num_samples=len(self.layers),
+                replacement=True
+            ) + 1  # 加1转换为实际的循环次数(1-3)
+        else:
+            # 不训练或不启用循环时，每层执行1次
+            loop_decisions = [1] * len(self.layers)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -1251,6 +1327,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
+                # 调用decoder_layer时传入循环次数
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -1258,6 +1335,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    loop_num=loop_decisions[idx] if self.training else 1,
+                    update_step=update_step,
+                    total_steps=total_steps,
                 )
 
             hidden_states = layer_outputs[0]

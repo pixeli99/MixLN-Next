@@ -442,8 +442,6 @@ class LlamaDecoderLayer(nn.Module):
             
         # 添加循环控制相关属性
         self.loop_enabled = os.getenv('LOOP_ENABLED', 'false').lower() == 'true'
-        self.time_embedding = nn.Embedding(4, config.hidden_size) if self.loop_enabled else None
-        self.loop_controller = nn.Linear(config.hidden_size, 1) if self.loop_enabled else None
             
     def forward(
         self,
@@ -1295,6 +1293,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 num_samples=len(self.layers),
                 replacement=True
             ) + 1  # 加1转换为实际的循环次数(1-3)
+            print(loop_decisions)
         else:
             # 不训练或不启用循环时，每层执行1次
             loop_decisions = [1] * len(self.layers)

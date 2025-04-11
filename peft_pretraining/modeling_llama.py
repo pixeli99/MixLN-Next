@@ -1407,6 +1407,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        update_step: Optional[int] = 0,
+        total_steps: Optional[int] = 1,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1451,6 +1453,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            update_step=update_step,
+            total_steps=total_steps,
         )
 
         hidden_states = outputs[0]

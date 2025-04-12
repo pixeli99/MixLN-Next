@@ -1280,12 +1280,12 @@ class LlamaModel(LlamaPreTrainedModel):
             # 训练初期主要使用loop=1，随着训练进度增加loop=2/3的概率
             progress = min(1.0, update_step / (total_steps * 0.5))  # 在一半的训练过程中完成概率转变
             # 随着训练进度调整概率分布: {p(1), p(2), p(3)}
-            # if progress < 0.2:
-            #     probs = [0.8, 0.1, 0.1]  # 初期几乎只用一次循环
-            # elif progress < 0.5:
-            #     probs = [0.6, 0.2, 0.2]  # 中期开始增加多循环概率
-            # else:
-            probs = [0.4, 0.3, 0.3]  # 后期使用目标分布
+            if progress < 0.2:
+                probs = [0.8, 0.1, 0.1]  # 初期几乎只用一次循环
+            elif progress < 0.5:
+                probs = [0.6, 0.2, 0.2]  # 中期开始增加多循环概率
+            else:
+                probs = [0.4, 0.3, 0.3]  # 后期使用目标分布
             
             # 为每一层随机决定循环次数
             loop_decisions = torch.multinomial(

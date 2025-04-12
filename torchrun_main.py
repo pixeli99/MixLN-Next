@@ -136,6 +136,13 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
 
 
 def main(args):
+    # 设置循环执行相关环境变量
+    if args.loop_enabled:
+        os.environ['LOOP_ENABLED'] = 'true'
+        logger.info(f"循环执行已启用. 初始概率: {args.loop_init_prob}, 最终概率: {args.loop_final_prob}")
+    else:
+        os.environ['LOOP_ENABLED'] = 'false'
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -328,13 +335,6 @@ def main(args):
             broadcast_buffers=False,
             find_unused_parameters=True,
         )
-
-    # 设置循环执行相关环境变量
-    if args.loop_enabled:
-        os.environ['LOOP_ENABLED'] = 'true'
-        logger.info(f"循环执行已启用. 初始概率: {args.loop_init_prob}, 最终概率: {args.loop_final_prob}")
-    else:
-        os.environ['LOOP_ENABLED'] = 'false'
 
     # global steps and others are defined above
     pad_idx = tokenizer.pad_token_id

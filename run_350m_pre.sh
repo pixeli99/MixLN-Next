@@ -24,5 +24,5 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node 4 --master_port=29501 tor
     --eval_every 1000 \
     --optimizer adam \
     --grad_clipping 0.0 \
-    --run_name "350m_res_${norm_type}_lr${learning_rates}_loop" \
-    --save_dir "350m_res_${norm_type}_lr${learning_rates}_loop"
+    --run_name "350m_res_${norm_type}_lr${learning_rates}" \
+    --save_dir "${LPAI_MODEL_DIR}/350m_res_${norm_type}_lr${learning_rates}"

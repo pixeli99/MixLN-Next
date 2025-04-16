@@ -1176,6 +1176,47 @@ class LlamaModel(LlamaPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+        # --- 修改：初始化时不计算 layer_importance ---
+        self.layer_importance = None # 初始化为 None
+        self.last_importance_update_step = -1 # 记录上次更新的步骤
+        self.importance_update_interval = int(os.getenv('LOOP_IMPORTANCE_UPDATE_INTERVAL', '1000')) # 更新间隔，例如每1000步
+
+        # --- 如果使用 weight_magnitude 策略，仍然需要定义峰值概率 ---
+        if os.getenv('LOOP_ENABLED', 'false').lower() == 'true' and os.getenv('LOOP_STRATEGY', 'weight_magnitude') == 'weight_magnitude':
+            max_loops = int(os.getenv('LOOP_MAX', '3'))
+            # 倾向少的峰值概率
+            self.peak_probs_low = torch.tensor([0.7, 0.2, 0.1][:max_loops])
+            self.peak_probs_low /= self.peak_probs_low.sum()
+            # 倾向多的峰值概率
+            self.peak_probs_high = torch.tensor([0.1, 0.4, 0.5][:max_loops])
+            self.peak_probs_high /= self.peak_probs_high.sum()
+        # --- 结束修改 ---
+    
+    # --- 新增：更新层重要性的方法 ---
+    def _update_layer_importance(self):
+        """Calculates and updates layer importance based on current weight norms."""
+        layer_norms = []
+        # 确保在评估模式下或无梯度上下文中计算，避免影响训练
+        with torch.no_grad():
+            current_device = next(self.parameters()).device # 获取当前模型设备
+            for layer in self.layers:
+                norm_sum = 0
+                # 累加 Attention 和 MLP 中主要线性层的 Frobenius 范数平方和
+                norm_sum += layer.self_attn.q_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.self_attn.k_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.self_attn.v_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.self_attn.o_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.mlp.gate_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.mlp.up_proj.weight.norm(p='fro').item()**2
+                norm_sum += layer.mlp.down_proj.weight.norm(p='fro').item()**2
+                layer_norms.append(math.sqrt(norm_sum))
+
+        layer_norms_tensor = torch.tensor(layer_norms, dtype=torch.float32, device=current_device) # 放到正确的设备
+        temperature = float(os.getenv('LOOP_WEIGHT_TEMP', '1.0'))
+        self.layer_importance = torch.softmax(layer_norms_tensor / temperature, dim=0)
+        print(f"Layer importance updated at step {self.last_importance_update_step}. New values:", self.layer_importance.cpu().numpy())
+    # --- 结束新增 ---
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -1276,27 +1317,59 @@ class LlamaModel(LlamaPreTrainedModel):
                 use_cache = False
 
         # 基于训练进度计算循环次数的概率分布
+        loop_strategy = os.getenv('LOOP_STRATEGY', 'progress')
+        if self.training and os.getenv('LOOP_ENABLED', 'false').lower() == 'true' and loop_strategy == 'weight_magnitude':
+            # 检查是否需要更新 layer_importance
+            if update_step >= self.last_importance_update_step + self.importance_update_interval:
+                self._update_layer_importance()
+                self.last_importance_update_step = update_step
+            # 确保首次调用或更新后 layer_importance 不是 None
+            if self.layer_importance is None:
+                 self._update_layer_importance() # 首次计算
+                 self.last_importance_update_step = update_step
+
         if self.training and os.getenv('LOOP_ENABLED', 'false').lower() == 'true':
-            # 训练初期主要使用loop=1，随着训练进度增加loop=2/3的概率
-            progress = min(1.0, update_step / (total_steps * 0.5))  # 在一半的训练过程中完成概率转变
-            # 随着训练进度调整概率分布: {p(1), p(2), p(3)}
-            if progress < 0.2:
-                probs = [0.8, 0.1, 0.1]  # 初期几乎只用一次循环
-            elif progress < 0.5:
-                probs = [0.6, 0.2, 0.2]  # 中期开始增加多循环概率
-            else:
-                probs = [0.4, 0.3, 0.3]  # 后期使用目标分布
-            
-            # 为每一层随机决定循环次数
-            loop_decisions = torch.multinomial(
-                torch.tensor(probs, device=hidden_states.device),
-                num_samples=len(self.layers),
-                replacement=True
-            ) + 1  # 加1转换为实际的循环次数(1-3)
-            print(loop_decisions)
+            max_loops = int(os.getenv('LOOP_MAX', '3'))
+            progress = min(1.0, update_step / total_steps) if total_steps > 0 else 0.0
+            intensity = math.sin(math.pi * progress)
+            base_probs = torch.tensor([1.0] + [0.0] * (max_loops - 1), device=hidden_states.device)
+            loop_decisions = torch.zeros(len(self.layers), dtype=torch.long, device=hidden_states.device)
+
+            if loop_strategy == 'weight_magnitude' and self.layer_importance is not None: # 确保已计算
+                # --- 策略：结合权重重要性 (使用 self.layer_importance) ---
+                peak_low = self.peak_probs_low.to(hidden_states.device)
+                peak_high = self.peak_probs_high.to(hidden_states.device)
+                # 使用更新后的 layer_importance
+                layer_importances = self.layer_importance.to(hidden_states.device)
+
+                for idx in range(len(self.layers)):
+                    importance = layer_importances[idx]
+                    layer_peak_probs = (1.0 - importance) * peak_low + importance * peak_high
+                    layer_current_probs = (1.0 - intensity) * base_probs + intensity * layer_peak_probs
+                    layer_current_probs /= layer_current_probs.sum()
+                    loop_decisions[idx] = torch.multinomial(layer_current_probs, num_samples=1).squeeze() + 1
+                # --- 结束策略 ---
+            else: # 回退到仅基于进度的策略
+                # ... (仅基于进度的策略代码，保持不变) ...
+                peak_probs = torch.tensor([0.2, 0.4, 0.4][:max_loops], device=hidden_states.device)
+                peak_probs /= peak_probs.sum()
+                current_probs = (1.0 - intensity) * base_probs + intensity * peak_probs
+                current_probs /= current_probs.sum()
+                probs_expanded = current_probs.repeat(len(self.layers), 1)
+                loop_decisions = torch.multinomial(
+                    probs_expanded,
+                    num_samples=1,
+                    replacement=True
+                ).squeeze() + 1
+            # 可选的调试输出
+            if update_step % 100 == 0: # 每100步打印一次
+                print(f"Step: {update_step}/{total_steps}, Progress: {progress:.2f}, Intensity: {intensity:.2f}, Probs: {current_probs.cpu().numpy()}, Decisions sample: {loop_decisions[:5].cpu().numpy()}")
+
         else:
             # 不训练或不启用循环时，每层执行1次
-            loop_decisions = [1] * len(self.layers)
+            # 创建一个与 hidden_states 在相同设备上的 tensor
+            loop_decisions = torch.ones(len(self.layers), dtype=torch.long, device=hidden_states.device)
+
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None

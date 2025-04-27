@@ -318,7 +318,7 @@ class LlamaDecoderLayer(nn.Module):
         if norm_type == 'attn_skip':
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.attn_sk = nn.Parameter(torch.zeros(1, device='cuda'), requires_grad=True)
+            self.attn_sk = nn.Parameter(torch.ones(1, device='cuda'), requires_grad=True)
         if norm_type == 'radia':
             self.input_layernorm = RadialNorm(config.hidden_size,)
             self.post_attention_layernorm = RadialNorm(config.hidden_size,)

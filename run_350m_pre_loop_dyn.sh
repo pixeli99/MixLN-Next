@@ -8,12 +8,12 @@ export layer_scale='true'
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME="/lpai/volumes/ad-vla-vol-ga/lipengxiang/vla/hf_cache"
 
-export LOOP_STRATEGY='progress'
+export LOOP_STRATEGY='weight_magnitude'
 # Function to run a single training task
 
 echo "Training with learning rate: $learning_rates, norm type: $norm_type on GPU $gpu"
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node 4 --master_port=29503 torchrun_main.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=29500 torchrun_main.py \
     --model_config configs/llama_350m.json \
     --lr $learning_rates \
     --batch_size 32 \

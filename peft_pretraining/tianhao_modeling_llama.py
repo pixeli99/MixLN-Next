@@ -91,31 +91,6 @@ class LlamaRMSNorm(nn.Module):
 
         return self.weight * hidden_states
 
-class CustomNorm(nn.Module):
-    def __init__(self, dim, num_groups):
-        super(CustomNorm, self).__init__()
-        self.group_norm = nn.GroupNorm(num_groups=num_groups, num_channels=dim)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1).unsqueeze(-1)
-        x = self.group_norm(x)
-        x = x.squeeze(-1).permute(0, 2, 1)
-        return x
-
-class RadialNorm(nn.Module):
-    def __init__(self, num_features, alpha=0.1):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(num_features))
-        self.beta = nn.Parameter(torch.zeros(num_features))
-        self.alpha = nn.Parameter(torch.tensor(alpha))  # 若需要可学习斜率
-    def forward(self, x):
-        # x shape: (batch, ..., features)
-        r = x.norm(dim=-1, keepdim=True)  # 范数 (batch,...,1)
-        # 计算缩放因子 h(r)，例如使用 tanh 实现
-        scale = (r / (r.detach()+1e-6)) * torch.tanh(self.alpha * r / (r.detach()+1e-6))
-        # 上式用 r.detach() 确保梯度正确传导，仅作为常量使用（或可直接用公式实现）
-        y = scale * x  # 按得到的因子缩放整個向量
-        return y * self.gamma + self.beta
 
 class LlamaRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
@@ -315,49 +290,20 @@ class LlamaDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             scale_mlp_output=scale_mlp_output,
         )
-        if norm_type == 'radia':
-            self.input_layernorm = RadialNorm(config.hidden_size,)
-            self.post_attention_layernorm = RadialNorm(config.hidden_size,)
-        if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'cod' or norm_type == 'deit' or norm_type == 'reboot_pre':
+        
+        if norm_type == 'pre' or norm_type == 'scale_pre':
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.linespace = float(os.getenv('linespace', '0.5'))
-            self.linespacestep = self.layer_nums
-            self.alpha_t = nn.Parameter(torch.linspace(1.0, self.linespace, self.linespacestep, device='cuda'), requires_grad=False)
-            if os.getenv('layer_scale', 'false') == 'true':
-                self.alpha_t = nn.Parameter(
-                    torch.tensor([1 / math.sqrt(l) for l in range(1, self.layer_nums + 1)], device='cuda'), 
-                    requires_grad=False
-                )
-            if os.getenv('layer_scale', 'false') == '1/l':
-                self.alpha_t = nn.Parameter(
-                    torch.tensor([1 / l for l in range(1, self.layer_nums + 1)], device='cuda'), 
-                    requires_grad=False
-                ) 
-            if norm_type == 'deit':
-                if self.layer_nums == 24:
-                    self.scale_hs = nn.Parameter(torch.ones(1, 1, self.hidden_size) * 1e-5, requires_grad=True)
-                elif self.layer_nums == 12:
-                    self.scale_hs = nn.Parameter(torch.ones(1, 1, self.hidden_size) * 0.1, requires_grad=True)
-                else:
-                    raise ValueError("Only support 12 or 24 layers for DeiT")
-            if norm_type == 'reboot_pre':
-                self.rec_iter = 0
-                self.max_layer_iterations = 3
-                self.layer_iteration_controller = nn.Linear(self.hidden_size, 1)
-                self.time_embedding = nn.Embedding(self.max_layer_iterations, self.hidden_size)
-        elif norm_type == 'group_pre':
-            self.input_layernorm = CustomNorm(num_groups=8, dim=self.hidden_size)
-            self.post_attention_layernorm = CustomNorm(num_groups=8, dim=self.hidden_size)
-        elif norm_type == 'lpx_norm' or norm_type == 'lpx_normv2':
+        elif norm_type in ['cod', 'cod_lpx']:
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.norm_weight = nn.Parameter(torch.Tensor([0]))
-        elif norm_type== 'post' or norm_type == 'deeppost' or norm_type == 'admin':
+            self.input_layernorm.weight.data.fill_(1/math.sqrt(layer_index+1))
+            self.post_attention_layernorm.weight.data.fill_(1/math.sqrt(layer_index+1))
+            if norm_type == 'cod_lpx':
+                self.norm_weight = nn.Parameter(torch.zeros(1))
+        elif norm_type== 'post' or norm_type == 'deeppost':
             self.post_feedforward_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            if norm_type == 'admin':
-                self.admin_factor = nn.Parameter(torch.tensor(0.015))
         elif norm_type == 'sandwich':
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -440,9 +386,6 @@ class LlamaDecoderLayer(nn.Module):
                 self.post_feedforward_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
                 self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             
-        # 添加循环控制相关属性
-        self.loop_enabled = os.getenv('LOOP_ENABLED', 'false').lower() == 'true'
-            
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -451,9 +394,6 @@ class LlamaDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        loop_num: int = 1,  # 新增参数，控制循环次数
-        update_step: int = 0,  # 新增参数，当前训练步数
-        total_steps: int = 0,  # 新增参数，总训练步数
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -467,16 +407,11 @@ class LlamaDecoderLayer(nn.Module):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-            loop_num (`int`, *optional*): 该层循环执行的次数，默认为1
         """
 
         norm_type = os.getenv('NORM_TYPE', 'pre').lower()
         
-        # 保存初始输入状态用于循环
-        original_hidden_states = hidden_states
-        
-        # 常规的一次前向传播 (第1次循环)
-        if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
+        if norm_type == 'pre' or norm_type == 'scale_pre':
             # Pre-LayerNorm Only
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -494,13 +429,12 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
-        elif norm_type == 'reboot_pre':
-            # 保存原始输入用于残差连接
-            original_input = hidden_states
-
-            # 初始处理 - 执行标准 Transformer 层一次
+        elif norm_type in ['cod', 'cod_lpx']:
+            # Pre-LayerNorm Only
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            if norm_type == 'cod_lpx':
+                residual = hidden_states * self.norm_weight + residual # added
             hidden_states, self_attn_weights, present_key_value = self.self_attn(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -513,53 +447,10 @@ class LlamaDecoderLayer(nn.Module):
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
+            if norm_type == 'cod_lpx':
+                residual = hidden_states * self.norm_weight + residual # added
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
-
-            # 初始层输出作为当前状态
-            current_state = hidden_states
-            accumulated_output = hidden_states
-
-            # 配置迭代参数
-            max_iterations = getattr(self, "max_layer_iterations", 3)  # 默认最多迭代3次
-            self.rec_iter += 1
-            # 自适应迭代整个层
-            for i in range(1, max_iterations):
-                # print(f'layer{self.layer_index}: iter:{i}')
-                # 计算继续迭代的概率
-                continue_prob = torch.sigmoid(self.layer_iteration_controller(current_state).mean(dim=1, keepdim=True))
-                
-                # 如果继续概率太低，则停止迭代
-                # if continue_prob.mean() < 0.1:
-                #     break
-                self.rec_iter += 1
-                # 执行完整的层处理 - 使用当前状态作为输入
-                residual = current_state
-                layer_input = self.input_layernorm(current_state + self.time_embedding(torch.tensor(i % 3, device='cuda')))
-                attn_output, _, _ = self.self_attn(
-                    hidden_states=layer_input,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=None,  # 迭代时不使用缓存
-                    output_attentions=False,
-                    use_cache=False,
-                )
-                attn_output = residual + attn_output
-                
-                residual = attn_output
-                mlp_input = self.post_attention_layernorm(attn_output + self.time_embedding(torch.tensor(i % 3, device='cuda')))
-                mlp_output = self.mlp(mlp_input)
-                layer_output = residual + mlp_output
-                
-                # 更新当前状态
-                current_state = layer_output
-                
-                # 权重累积结果
-                iteration_weight = continue_prob
-                accumulated_output = accumulated_output * (1 - iteration_weight) + current_state * iteration_weight
-
-            # 最终使用累积输出
-            hidden_states = accumulated_output
         elif norm_type == 'scale_res_pre_norm':
             # Pre-LayerNorm Only
             residual = hidden_states
@@ -578,7 +469,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states * self.raw_scaling_factor_mlp
-        elif norm_type == 'post' or norm_type == 'deeppost' or norm_type == 'admin':
+        elif norm_type == 'post' or norm_type == 'deeppost':
             # Post-LayerNorm Only
             residual = hidden_states
             hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -590,18 +481,14 @@ class LlamaDecoderLayer(nn.Module):
                 use_cache=use_cache,
             )
             if norm_type == 'deeppost':
-                residual = ((2 * self.layer_nums) ** 0.25) * residual
-            if norm_type == 'admin':
-                residual = residual * self.admin_factor
+                residual = 2.8284271247461903 * residual
             hidden_states = residual + hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
 
             residual = hidden_states
             hidden_states = self.mlp(hidden_states)
             if norm_type == 'deeppost':
-                residual = ((2 * self.layer_nums) ** 0.25) * residual
-            if norm_type == 'admin':
-                residual = residual * self.admin_factor
+                residual = 2.8284271247461903 * residual
             hidden_states = residual + hidden_states
             hidden_states = self.post_feedforward_layernorm(hidden_states)
 
@@ -907,108 +794,6 @@ class LlamaDecoderLayer(nn.Module):
                 hidden_states = self.mlp(hidden_states)
                 hidden_states = residual + hidden_states
                 hidden_states = self.post_feedforward_layernorm(hidden_states)
-        elif norm_type == 'cod':
-            # Layer 1: Self-Attention
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-            hidden_states = self.alpha_t[self.layer_index] * hidden_states # scale
-            hidden_states, self_attn_weights, present_key_value = self.self_attn(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
-            hidden_states = residual + hidden_states
-
-            # Layer 2: Feed-Forward Network (FFN)
-            residual = hidden_states
-            hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states = self.alpha_t[self.layer_index] * hidden_states # scale
-
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = residual + hidden_states
-
-        elif norm_type == 'lpx_norm':
-            # Pre-LayerNorm Only
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-            residual = hidden_states * self.norm_weight + residual
-
-            hidden_states, self_attn_weights, present_key_value = self.self_attn(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
-            hidden_states = residual + hidden_states
-            # -------
-            residual = hidden_states
-            hidden_states = self.post_attention_layernorm(hidden_states)
-            residual = hidden_states * self.norm_weight + residual
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = residual + hidden_states
-        elif norm_type == 'deit':
-            # Layer 1: Self-Attention
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-            hidden_states, self_attn_weights, present_key_value = self.self_attn(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
-            hidden_states = residual + hidden_states * self.scale_hs
-
-            # Layer 2: Feed-Forward Network (FFN)
-            residual = hidden_states
-            hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = residual + hidden_states * self.scale_hs
-
-        # 如果启用了循环并且请求的循环次数大于1
-        if self.loop_enabled and loop_num > 1:
-            current_state = hidden_states
-            accumulated_output = hidden_states
-
-            # 额外的循环执行 (第2次及以后)
-            for i in range(1, loop_num):
-                # 添加时间嵌入，区分不同迭代
-                # time_emb = self.time_embedding(torch.tensor(i % 3, device=hidden_states.device)).unsqueeze(1)
-                
-                # 基于当前状态计算下一次循环的输入
-                if norm_type == 'pre' or norm_type in ['scale_pre', 'group_pre', 'radia']:
-                    residual = current_state
-                    layer_input = self.input_layernorm(current_state)
-                    attn_output, _, _ = self.self_attn(
-                        hidden_states=layer_input,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_value=None,  # 迭代时不使用缓存
-                        output_attentions=False,
-                        use_cache=False,
-                    )
-                    attn_output = residual + attn_output
-                    
-                    residual = attn_output
-                    mlp_input = self.post_attention_layernorm(attn_output)
-                    mlp_output = self.mlp(mlp_input)
-                    iter_output = residual + mlp_output
-                    
-                    # 更新当前状态
-                    current_state = iter_output
-                    
-                    # 使用简单平均累积结果
-                    # accumulated_output = (accumulated_output * i + current_state) / (i + 1)
-                # ...可以添加其他norm_type的循环逻辑...
-                
-            # 使用累积的输出替代单次前向传播的结果
-            hidden_states = current_state
 
         outputs = (hidden_states,)
 
@@ -1176,47 +961,6 @@ class LlamaModel(LlamaPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        # --- 修改：初始化时不计算 layer_importance ---
-        self.layer_importance = None # 初始化为 None
-        self.last_importance_update_step = -1 # 记录上次更新的步骤
-        self.importance_update_interval = int(os.getenv('LOOP_IMPORTANCE_UPDATE_INTERVAL', '1000')) # 更新间隔，例如每1000步
-
-        # --- 如果使用 weight_magnitude 策略，仍然需要定义峰值概率 ---
-        if os.getenv('LOOP_ENABLED', 'false').lower() == 'true' and os.getenv('LOOP_STRATEGY', 'weight_magnitude') == 'weight_magnitude':
-            max_loops = int(os.getenv('LOOP_MAX', '3'))
-            # 倾向少的峰值概率
-            self.peak_probs_low = torch.tensor([0.7, 0.2, 0.1][:max_loops])
-            self.peak_probs_low /= self.peak_probs_low.sum()
-            # 倾向多的峰值概率
-            self.peak_probs_high = torch.tensor([0.1, 0.4, 0.5][:max_loops])
-            self.peak_probs_high /= self.peak_probs_high.sum()
-        # --- 结束修改 ---
-    
-    # --- 新增：更新层重要性的方法 ---
-    def _update_layer_importance(self):
-        """Calculates and updates layer importance based on current weight norms."""
-        layer_norms = []
-        # 确保在评估模式下或无梯度上下文中计算，避免影响训练
-        with torch.no_grad():
-            current_device = next(self.parameters()).device # 获取当前模型设备
-            for layer in self.layers:
-                norm_sum = 0
-                # 累加 Attention 和 MLP 中主要线性层的 Frobenius 范数平方和
-                norm_sum += layer.self_attn.q_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.self_attn.k_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.self_attn.v_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.self_attn.o_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.mlp.gate_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.mlp.up_proj.weight.norm(p='fro').item()**2
-                norm_sum += layer.mlp.down_proj.weight.norm(p='fro').item()**2
-                layer_norms.append(math.sqrt(norm_sum))
-
-        layer_norms_tensor = torch.tensor(layer_norms, dtype=torch.float32, device=current_device) # 放到正确的设备
-        temperature = float(os.getenv('LOOP_WEIGHT_TEMP', '1.0'))
-        self.layer_importance = torch.softmax(layer_norms_tensor / temperature, dim=0)
-        print(f"Layer importance updated at step {self.last_importance_update_step}. New values:", self.layer_importance.cpu().numpy())
-    # --- 结束新增 ---
-
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -1237,7 +981,7 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
         if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_len]
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
             expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
                 inputs_embeds.device
             )
@@ -1259,8 +1003,6 @@ class LlamaModel(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        update_step: Optional[int] = 0,
-        total_steps: Optional[int] = 1,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1316,62 +1058,6 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
                 use_cache = False
 
-        # 基于训练进度计算循环次数的概率分布
-        loop_strategy = os.getenv('LOOP_STRATEGY', 'progress')
-        if self.training and os.getenv('LOOP_ENABLED', 'false').lower() == 'true' and loop_strategy == 'weight_magnitude':
-            # 检查是否需要更新 layer_importance
-            if update_step >= self.last_importance_update_step + self.importance_update_interval:
-                self._update_layer_importance()
-                self.last_importance_update_step = update_step
-            # 确保首次调用或更新后 layer_importance 不是 None
-            if self.layer_importance is None:
-                 self._update_layer_importance() # 首次计算
-                 self.last_importance_update_step = update_step
-
-        if self.training and os.getenv('LOOP_ENABLED', 'false').lower() == 'true':
-            max_loops = int(os.getenv('LOOP_MAX', '3'))
-            progress = min(1.0, update_step / total_steps) if total_steps > 0 else 0.0
-            intensity = math.sin(math.pi * progress)
-            base_probs = torch.tensor([1.0] + [0.0] * (max_loops - 1), device=hidden_states.device)
-            loop_decisions = torch.zeros(len(self.layers), dtype=torch.long, device=hidden_states.device)
-
-            if loop_strategy == 'weight_magnitude' and self.layer_importance is not None: # 确保已计算
-                # --- 策略：结合权重重要性 (使用 self.layer_importance) ---
-                peak_low = self.peak_probs_low.to(hidden_states.device)
-                peak_high = self.peak_probs_high.to(hidden_states.device)
-                # 使用更新后的 layer_importance
-                layer_importances = self.layer_importance.to(hidden_states.device)
-
-                for idx in range(len(self.layers)):
-                    importance = layer_importances[idx]
-                    layer_peak_probs = (1.0 - importance) * peak_low + importance * peak_high
-                    layer_current_probs = (1.0 - intensity) * base_probs + intensity * layer_peak_probs
-                    layer_current_probs /= layer_current_probs.sum()
-                    loop_decisions[idx] = torch.multinomial(layer_current_probs, num_samples=1).squeeze() + 1
-                    current_probs = layer_current_probs
-                # --- 结束策略 ---
-            else: # 回退到仅基于进度的策略
-                # ... (仅基于进度的策略代码，保持不变) ...
-                peak_probs = torch.tensor([0.2, 0.4, 0.4][:max_loops], device=hidden_states.device)
-                peak_probs /= peak_probs.sum()
-                current_probs = (1.0 - intensity) * base_probs + intensity * peak_probs
-                current_probs /= current_probs.sum()
-                probs_expanded = current_probs.repeat(len(self.layers), 1)
-                loop_decisions = torch.multinomial(
-                    probs_expanded,
-                    num_samples=1,
-                    replacement=True
-                ).squeeze() + 1
-            # 可选的调试输出
-            if update_step % 100 == 0: # 每100步打印一次
-                print(f"Step: {update_step}/{total_steps}, Progress: {progress:.2f}, Intensity: {intensity:.2f}, Probs: {current_probs.cpu().numpy()}, Decisions sample: {loop_decisions[:5].cpu().numpy()}")
-
-        else:
-            # 不训练或不启用循环时，每层执行1次
-            # 创建一个与 hidden_states 在相同设备上的 tensor
-            loop_decisions = torch.ones(len(self.layers), dtype=torch.long, device=hidden_states.device)
-
-
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -1400,7 +1086,6 @@ class LlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
-                # 调用decoder_layer时传入循环次数
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -1408,9 +1093,6 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
-                    loop_num=loop_decisions[idx] if self.training else 1,
-                    update_step=update_step,
-                    total_steps=total_steps,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1480,8 +1162,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        update_step: Optional[int] = 0,
-        total_steps: Optional[int] = 1,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1526,8 +1206,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            update_step=update_step,
-            total_steps=total_steps,
         )
 
         hidden_states = outputs[0]

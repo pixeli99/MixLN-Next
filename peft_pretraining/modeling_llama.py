@@ -484,6 +484,7 @@ class LlamaDecoderLayer(nn.Module):
             # Pre-LayerNorm Only
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            attn_input = hidden_states
             hidden_states, self_attn_weights, present_key_value = self.self_attn(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -492,7 +493,7 @@ class LlamaDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-            hidden_states = residual + hidden_states * self.attn_gate(residual)
+            hidden_states = residual + hidden_states * self.attn_gate(attn_input)
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)

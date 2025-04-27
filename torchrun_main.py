@@ -457,7 +457,23 @@ def main(args):
                 },
                 step=global_step,
             )
-        update_time = time.time()
+            
+            # 收集并记录每层的 attn_sk 参数
+            if os.getenv('NORM_TYPE', 'pre').lower() == 'attn_skip':
+                attn_sk_values = {}
+                if not args.single_gpu:
+                    target_model = model.module
+                else:
+                    target_model = model
+                    
+                for layer_idx, layer in enumerate(target_model.model.layers):
+                    if hasattr(layer, 'attn_sk'):
+                        attn_sk_values[f"layer_{layer_idx}_attn_sk"] = layer.attn_sk.item()
+                
+                if attn_sk_values:
+                    wandb.log(attn_sk_values, step=global_step)
+            
+            update_time = time.time()
 
     # ##############################
     # END of training loop

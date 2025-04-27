@@ -319,7 +319,7 @@ class LlamaDecoderLayer(nn.Module):
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             # self.attn_sk = nn.Parameter(torch.ones(1, device='cuda'), requires_grad=True)
-            self.attn_sk =  nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+            self.attn_gate =  nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         if norm_type == 'radia':
             self.input_layernorm = RadialNorm(config.hidden_size,)
             self.post_attention_layernorm = RadialNorm(config.hidden_size,)
@@ -492,7 +492,7 @@ class LlamaDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-            hidden_states = residual + hidden_states * self.attn_sk(residual)
+            hidden_states = residual + hidden_states * self.attn_gate(residual)
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)

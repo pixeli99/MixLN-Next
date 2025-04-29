@@ -76,17 +76,14 @@ class TokenWiseGate(nn.Module):
         super().__init__()
         # 1️⃣ 先让 gate 初值 ≈ 1  —— 解决原因 #1
         self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        nn.init.zeros_(self.proj.weight)           # 不引入随机缩放
-        nn.init.constant_(self.proj.bias, init_bias)  # σ(4) ≈ 0.982
-
-        self.act = nn.Sigmoid()
+        self.act = nn.SiLU()
 
     def forward(self, norm_x, x, new):
         # 2️⃣ 把 gate 依赖改到 x，并切断梯度  —— 解决原因 #2
-        gate = self.act(self.proj(norm_x.detach()))     # shape (B,T,d)
+        gate = self.act(self.proj(norm_x))     # shape (B,T,d)
 
         # 3️⃣ 对 new 做对称缩放  —— 解决原因 #3
-        out = gate * x + (1 - gate) * new
+        out = gate * x + new
         return out
 
 class LlamaRMSNorm(nn.Module):
@@ -338,6 +335,7 @@ class LlamaDecoderLayer(nn.Module):
             # self.attn_sk = nn.Parameter(torch.ones(1, device='cuda'), requires_grad=True)
             # self.attn_gate =  nn.Linear(config.hidden_size, config.hidden_size, bias=False)
             self.g1 = TokenWiseGate(config.hidden_size)
+            self.g2 = TokenWiseGate(config.hidden_size)
         if norm_type == 'radia':
             self.input_layernorm = RadialNorm(config.hidden_size,)
             self.post_attention_layernorm = RadialNorm(config.hidden_size,)
@@ -515,8 +513,10 @@ class LlamaDecoderLayer(nn.Module):
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
+            attn_input = hidden_states
             hidden_states = self.mlp(hidden_states)
-            hidden_states = residual + hidden_states
+            # hidden_states = residual + hidden_states
+            hidden_states = self.g2(residual, attn_input, hidden_states)
         # 常规的一次前向传播 (第1次循环)
         if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
             # Pre-LayerNorm Only

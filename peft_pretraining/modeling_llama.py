@@ -74,7 +74,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 class TokenWiseGate(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
-        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
         nn.init.zeros_(self.proj.weight)
         nn.init.constant_(self.proj.bias, 2.0)   # 88% keep at start
 

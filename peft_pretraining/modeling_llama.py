@@ -516,14 +516,14 @@ class LlamaDecoderLayer(nn.Module):
                 use_cache=use_cache,
             )
             
-            d_para, d_orth = self._project(hidden_states, residual.detach(), self.eps)
+            d_para, d_orth = self._project(hidden_states, attn_input.detach(), self.eps)
             hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             attn_input = hidden_states
             hidden_states = self.mlp(hidden_states)
-            d_para, d_orth = self._project(hidden_states, residual.detach(), self.eps)
+            d_para, d_orth = self._project(hidden_states, attn_input.detach(), self.eps)
             hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
 
         # 常规的一次前向传播 (第1次循环)

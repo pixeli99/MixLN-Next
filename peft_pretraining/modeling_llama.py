@@ -332,10 +332,9 @@ class LlamaDecoderLayer(nn.Module):
         if norm_type == 'attn_skip':
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            # self.attn_sk = nn.Parameter(torch.ones(1, device='cuda'), requires_grad=True)
-            # self.attn_gate =  nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-            self.g1 = TokenWiseGate(config.hidden_size)
-            self.g2 = TokenWiseGate(config.hidden_size)
+            self.lam  = nn.Parameter(torch.zeros(1))   # λ_l ← 0
+            self.beta = nn.Parameter(torch.ones(1))    # β_l ← 1
+            self.eps = 1e-5
         if norm_type == 'radia':
             self.input_layernorm = RadialNorm(config.hidden_size,)
             self.post_attention_layernorm = RadialNorm(config.hidden_size,)
@@ -463,7 +462,14 @@ class LlamaDecoderLayer(nn.Module):
             
         # 添加循环控制相关属性
         self.loop_enabled = os.getenv('LOOP_ENABLED', 'false').lower() == 'true'
-            
+
+    @staticmethod
+    def _project(delta, r, eps):
+        dot   = (delta * r).sum(-1, keepdim=True)
+        norm2 = r.pow(2).sum(-1, keepdim=True) + eps
+        para  = dot / norm2 * r
+        return para, delta - para
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -509,14 +515,17 @@ class LlamaDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-            hidden_states = self.g1(residual, attn_input, hidden_states)
+            
+            d_para, d_orth = self._project(hidden_states, residual.detach(), self.eps)
+            hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             attn_input = hidden_states
             hidden_states = self.mlp(hidden_states)
-            # hidden_states = residual + hidden_states
-            hidden_states = self.g2(residual, attn_input, hidden_states)
+            d_para, d_orth = self._project(hidden_states, residual.detach(), self.eps)
+            hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
+
         # 常规的一次前向传播 (第1次循环)
         if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
             # Pre-LayerNorm Only

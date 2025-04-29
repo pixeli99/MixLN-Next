@@ -75,10 +75,11 @@ class TokenWiseGate(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
         self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.act = nn.SiLU()
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, x, new):
-        gate = nn.SiLU(self.proj(x))       # shape = (B,T,d)
+        gate = self.act(self.proj(x))       # shape = (B,T,d)
         return gate * x + new
 
 class LlamaRMSNorm(nn.Module):

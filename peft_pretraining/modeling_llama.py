@@ -74,13 +74,12 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 class TokenWiseGate(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
-        self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.zeros_(self.proj.weight)
-        nn.init.constant_(self.proj.bias, 2.0)   # 88% keep at start
 
     def forward(self, x, new):
-        gate = torch.sigmoid(self.proj(x))       # shape = (B,T,d)
-        return gate * x + (1.0 - gate) * new
+        gate = nn.SiLU(self.proj(x))       # shape = (B,T,d)
+        return gate * x + new
 
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):

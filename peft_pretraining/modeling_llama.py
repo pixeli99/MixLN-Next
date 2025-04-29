@@ -72,14 +72,22 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 class TokenWiseGate(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, init_bias=4.0):
         super().__init__()
-        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.act  = nn.Sigmoid()
+        # 1️⃣ 先让 gate 初值 ≈ 1  —— 解决原因 #1
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        nn.init.zeros_(self.proj.weight)           # 不引入随机缩放
+        nn.init.constant_(self.proj.bias, init_bias)  # σ(4) ≈ 0.982
+
+        self.act = nn.Sigmoid()
 
     def forward(self, x, new):
-        gate = self.act(self.proj(new))             # gate ≈ 1 at start
-        return gate * x + new
+        # 2️⃣ 把 gate 依赖改到 x，并切断梯度  —— 解决原因 #2
+        gate = self.act(self.proj(x.detach()))     # shape (B,T,d)
+
+        # 3️⃣ 对 new 做对称缩放  —— 解决原因 #3
+        out = gate * x + (1 - gate) * new
+        return out
 
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):

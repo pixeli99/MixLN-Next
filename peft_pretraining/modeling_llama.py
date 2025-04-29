@@ -224,7 +224,8 @@ class LlamaAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.o1_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.o2_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
         
         if scale_attn_weights:
@@ -288,12 +289,13 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = self.o_proj(attn_output)
+        attn_output1 = self.o1_proj(attn_output)
+        attn_output2 = self.o2_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output1, attn_output2, attn_weights, past_key_value
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -332,9 +334,6 @@ class LlamaDecoderLayer(nn.Module):
         if norm_type == 'attn_skip':
             self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.lam  = nn.Parameter(torch.zeros(1))   # λ_l ← 0
-            self.beta = nn.Parameter(torch.ones(1))    # β_l ← 1
-            self.eps = 1e-5
         if norm_type == 'radia':
             self.input_layernorm = RadialNorm(config.hidden_size,)
             self.post_attention_layernorm = RadialNorm(config.hidden_size,)
@@ -462,13 +461,6 @@ class LlamaDecoderLayer(nn.Module):
             
         # 添加循环控制相关属性
         self.loop_enabled = os.getenv('LOOP_ENABLED', 'false').lower() == 'true'
-
-    @staticmethod
-    def _project(delta, r, eps):
-        dot   = (delta * r).sum(-1, keepdim=True)
-        norm2 = r.pow(2).sum(-1, keepdim=True) + eps
-        para  = dot / norm2 * r
-        return para, delta - para
     
     def forward(
         self,
@@ -507,7 +499,7 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
             attn_input = hidden_states
-            hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states1, hidden_states2, self_attn_weights, present_key_value = self.self_attn(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -515,16 +507,14 @@ class LlamaDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-            
-            d_para, d_orth = self._project(hidden_states, attn_input.detach(), self.eps)
-            hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
+            variance = residual.to(torch.float32).pow(2).mean(-1, keepdim=True)
+            hidden_states = residual - hidden_states1 * torch.sqrt(variance + 1e-6) + hidden_states2
 
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             attn_input = hidden_states
             hidden_states = self.mlp(hidden_states)
-            d_para, d_orth = self._project(hidden_states, attn_input.detach(), self.eps)
-            hidden_states = (1 - self.lam) * hidden_states - self.lam * d_para + self.beta * d_orth
+            hidden_states = residual + hidden_states
 
         # 常规的一次前向传播 (第1次循环)
         if norm_type == 'pre' or norm_type == 'scale_pre' or norm_type == 'group_pre' or norm_type == 'radia':
